@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Детектор скриншотов PWA</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; background: #f0f0f0; }
+        #status { font-size: 24px; padding: 20px; margin: 10px 0; border-radius: 10px; text-align: center; }
+        .detected { background: #ff4444; color: white; animation: pulse 1s infinite; }
+        .idle { background: #ddd; }
+        #log { background: white; padding: 15px; border-radius: 5px; max-height: 300px; overflow-y: auto; }
+        .log-entry { padding: 5px; border-bottom: 1px solid #eee; }
+        canvas { display: block; margin: 10px auto; border: 1px solid #ccc; }
+        button { padding: 10px 20px; font-size: 16px; margin: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Тестировщик детекции скриншотов в PWA</h1>
+    <div id="status" class="idle">Готов к мониторингу... Делайте скриншот!</div>
+    <canvas id="fpsCanvas" width="300" height="100"></canvas>
+    <div>
+        <button onclick="toggleMonitor()">Вкл/Выкл мониторинг</button>
+        <button onclick="testClipboard()">Тест Clipboard</button>
+        <button onclick="clearLog()">Очистить лог</button>
+    </div>
+    <h3>Лог детекций:</h3>
+    <div id="log"></div>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const logEl = document.getElementById('log');
+        const canvas = document.getElementById('fpsCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let isMonitoring = false;
+        let lastTime = 0;
+        let frameCount = 0;
+        let fpsSamples = [];
+        const FPS_BASELINE = 58; // Safari iOS ~60
+        const FPS_DROP_THRESHOLD = 0.7; // <70% от baseline
+
+        let baselineFPS = FPS_BASELINE;
+        let rafId = null;
+        let clipboardCheckInterval = null;
+        let perfObserver = null;
+
+        function log(message, method = 'unknown') {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<strong>${new Date().toLocaleTimeString()}</strong> | <em>${method}</em>: ${message}`;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateStatus(text, isDetected = false) {
+            statusEl.textContent = text;
+            statusEl.className = isDetected ? 'detected' : 'idle';
+            if (isDetected) {
+                statusEl.style.animation = 'pulse 0.5s infinite';
+                log('🚨 СКРИНШОТ ОБНАРУЖЕН!', 'Статус');
+            }
+        }
+
+        // FPS Monitor
+        function fpsLoop(time) {
+            if (!lastTime) lastTime = time;
+            frameCount++;
+            if (time - lastTime >= 1000) {
+                const fps = frameCount * 1000 / (time - lastTime);
+                fpsSamples.push(fps);
+                if (fpsSamples.length > 10) fpsSamples.shift();
+                baselineFPS = fpsSamples.reduce((a, b) => a + b, 0) / fpsSamples.length;
+                checkFPS(fps);
+                frameCount = 0;
+                lastTime = time;
+            }
+            drawFPSChart();
+            if (isMonitoring) rafId = requestAnimationFrame(fpsLoop);
+        }
+
+        function checkFPS(currentFPS) {
+            const dropRatio = currentFPS / baselineFPS;
+            if (dropRatio < FPS_DROP_THRESHOLD && baselineFPS > 30) {
+                updateStatus(`FPS drop: ${currentFPS.toFixed(0)} (${(dropRatio*100).toFixed(0)}%)`, true);
+                log(`FPS падение ниже ${FPS_DROP_THRESHOLD*100}% от baseline ${baselineFPS.toFixed(0)}`, 'FPS');
+            }
+        }
+
+        function drawFPSChart() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#333';
+            ctx.fillText('FPS график (последние 10с)', 10, 20);
+            const avg = fpsSamples.reduce((a,b)=>a+b,0)/fpsSamples.length || 0;
+            ctx.fillText(`Avg: ${avg.toFixed(0)} | Baseline: ${baselineFPS.toFixed(0)}`, 10, 40);
+            ctx.strokeStyle = '#00f';
+            ctx.beginPath();
+            let x = 0;
+            fpsSamples.forEach(fps => {
+                ctx.lineTo(x, 50 - (fps / 60 * 40));
+                x += 25;
+            });
+            ctx.stroke();
+        }
+
+        // Clipboard Monitor
+        async function checkClipboard() {
+            if (!navigator.clipboard) {
+                log('Clipboard API не поддерживается', 'Clipboard');
+                return;
+            }
+            try {
+                const items = await navigator.clipboard.read();
+                for (let item of items) {
+                    if (item.types.includes('image/png') || item.types.includes('image/jpeg')) {
+                        updateStatus('Изображение в clipboard!', true);
+                        log('Найдено изображение в буфере', 'Clipboard');
+                        return;
+                    }
+                }
+            } catch (e) {
+                log(`Clipboard error: ${e.message} (нужен HTTPS/gesture)`, 'Clipboard');
+            }
+        }
+
+        // Visibility & Perf
+        function setupPerfObserver() {
+            if ('PerformanceObserver' in window) {
+                perfObserver = new PerformanceObserver((list) => {
+                    list.getEntries().forEach(entry => {
+                        if (entry.duration > 100) { // Long task
+                            log(`LongTask ${entry.duration}ms`, 'Perf');
+                            updateStatus(`LongTask ${entry.duration}ms`, true);
+                        }
+                    });
+                });
+                perfObserver.observe({ entryTypes: ['longtask'] });
+            }
+        }
+
+        function onVisibilityChange() {
+            if (document.visibilityState === 'hidden') {
+                log('Страница скрыта (возможно multitask)', 'Visibility');
+            }
+        }
+
+        // Controls
+        function toggleMonitor() {
+            isMonitoring = !isMonitoring;
+            if (isMonitoring) {
+                requestAnimationFrame(fpsLoop);
+                clipboardCheckInterval = setInterval(checkClipboard, 2000);
+                document.addEventListener('visibilitychange', onVisibilityChange);
+                setupPerfObserver();
+                log('Мониторинг запущен', 'Start');
+                updateStatus('Мониторинг активен...');
+            } else {
+                cancelAnimationFrame(rafId);
+                clearInterval(clipboardCheckInterval);
+                if (perfObserver) perfObserver.disconnect();
+                log('Мониторинг остановлен', 'Stop');
+                updateStatus('Остановлен');
+            }
+        }
+
+        function testClipboard() {
+            checkClipboard();
+        }
+
+        function clearLog() {
+            logEl.innerHTML = '';
+        }
+
+        // Автозапуск для теста
+        setTimeout(() => {
+            if (confirm('Запустить мониторинг?')) toggleMonitor();
+        }, 1000);
+
+        log('Страница загружена. Методы: FPS drop, Clipboard image, LongTasks, Visibility.', 'Init');
+    </script>
+</body>
+</html>
