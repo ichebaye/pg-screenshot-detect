@@ -529,8 +529,19 @@ function drawFPS(currentFPS) {
 }
 
 // ─── Method 2: Clipboard Monitor ─────────────────────────────────────────────
-let clipboardSupported = !!(navigator.clipboard && navigator.clipboard.read);
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isHTTPS = location.protocol === 'https:';
+
+let clipboardSupported = !isIOS && isHTTPS && !!(navigator.clipboard && navigator.clipboard.read);
 let clipboardPermissionDenied = false;
+
+function getClipboardUnsupportedReason() {
+    if (isIOS)    return 'iOS Safari не поддерживает clipboard.read()';
+    if (!isHTTPS) return 'Требуется HTTPS (сейчас HTTP)';
+    if (!navigator.clipboard || !navigator.clipboard.read) return 'Браузер не реализует clipboard.read()';
+    return null;
+}
 
 async function checkClipboard() {
     if (!clipboardSupported || clipboardPermissionDenied) return;
@@ -546,7 +557,7 @@ async function checkClipboard() {
         if (e.name === 'NotAllowedError') {
             clipboardPermissionDenied = true;
             setMethodState('clipboard', 'unsupported');
-            addLog('Clipboard', 'Доступ запрещён (требуется HTTPS и разрешение пользователя)');
+            addLog('Clipboard', 'Разрешение отклонено пользователем или браузером');
         }
         // Ignore other errors silently
     }
@@ -751,6 +762,8 @@ function startMonitoring() {
         clipboardInterval = setInterval(checkClipboard, 3000);
     } else {
         setMethodState('clipboard', 'unsupported');
+        const reason = getClipboardUnsupportedReason();
+        if (reason) addLog('Clipboard', reason);
     }
 
     // Method 3: Long Tasks
